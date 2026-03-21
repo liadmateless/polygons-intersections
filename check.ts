@@ -1,68 +1,106 @@
 import * as turf from '@turf/turf';
+import {
+  Feature,
+  Polygon,
+  MultiPolygon,
+  GeoJsonProperties
+} from 'geojson';
 
-type Poly = turf.Feature<turf.Polygon | turf.MultiPolygon>;
+type Poly = Feature<Polygon | MultiPolygon>;
 
-export function getSmallestIntersections(polygons: Poly[]) {
-  const results: { indexes: number[]; intersection: any }[] = [];
+type IntersectionResult = {
+  indexes: number[];
+  intersection: Feature<Polygon | MultiPolygon, GeoJsonProperties>;
+};
+
+function bboxOverlap(b1: number[], b2: number[]): boolean {
+  return !(
+    b2[0] > b1[2] ||
+    b2[2] < b1[0] ||
+    b2[1] > b1[3] ||
+    b2[3] < b1[1]
+  );
+}
+
+export function getMaximalIntersections(
+  polygons: Poly[]
+): IntersectionResult[] {
   const n = polygons.length;
+  const bboxes = polygons.map(p => turf.bbox(p));
 
-  // helper: intersect multiple polygons
-  function intersectGroup(indexes: number[]) {
-    let res = polygons[indexes[0]];
+  const results: IntersectionResult[] = [];
+  const queue: IntersectionResult[] = [];
 
-    for (let i = 1; i < indexes.length; i++) {
-      const fc = turf.featureCollection([res, polygons[indexes[i]]]);
-      const inter = turf.intersect(fc);
+  // 🔹 Step 1: seed with pairs
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
 
-      if (!inter) return null;
-      res = inter as any;
-    }
+      if (!bboxOverlap(bboxes[i], bboxes[j])) continue;
 
-    return res;
-  }
-
-  // helper: generate combinations
-  function combinations(arr: number[], size: number): number[][] {
-    const res: number[][] = [];
-
-    function backtrack(start: number, path: number[]) {
-      if (path.length === size) {
-        res.push([...path]);
-        return;
-      }
-
-      for (let i = start; i < arr.length; i++) {
-        path.push(arr[i]);
-        backtrack(i + 1, path);
-        path.pop();
-      }
-    }
-
-    backtrack(0, []);
-    return res;
-  }
-
-  const allIndexes = Array.from({ length: n }, (_, i) => i);
-
-  // 🔥 Step 1: try bigger groups first
-  for (let size = n; size >= 2; size--) {
-    const groups = combinations(allIndexes, size);
-
-    for (const group of groups) {
-      // skip if already covered by bigger result
-      const covered = results.some(r =>
-        group.every(i => r.indexes.includes(i))
+      const inter = turf.intersect(
+        turf.featureCollection([polygons[i], polygons[j]])
       );
-      if (covered) continue;
 
-      const inter = intersectGroup(group);
-      if (inter) {
-        results.push({ indexes: group, intersection: inter });
-      }
+      if (!inter) continue;
+
+      queue.push({
+        indexes: [i, j],
+        intersection: inter as Poly
+      });
     }
   }
 
-  return results;
+  // 🔹 Step 2: BFS expansion
+  const seen = new Set<string>();
+
+  while (queue.length) {
+    const current = queue.shift()!;
+    const sortedIndexes = [...current.indexes].sort((a, b) => a - b);
+    const key = sortedIndexes.join(',');
+
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    let expanded = false;
+
+    const currentBBox = turf.bbox(current.intersection);
+
+    for (let k = 0; k < n; k++) {
+      if (current.indexes.includes(k)) continue;
+
+      if (!bboxOverlap(currentBBox, bboxes[k])) continue;
+
+      const next = turf.intersect(
+        turf.featureCollection([current.intersection, polygons[k]])
+      );
+
+      if (next) {
+        expanded = true;
+
+        queue.push({
+          indexes: [...current.indexes, k],
+          intersection: next as Poly
+        });
+      }
+    }
+
+    // 🔹 Step 3: if cannot expand → it's maximal
+    if (!expanded) {
+      results.push({
+        indexes: sortedIndexes,
+        intersection: current.intersection
+      });
+    }
+  }
+
+  // 🔹 Step 4: remove subsets
+  return results.filter(r =>
+    !results.some(other =>
+      other !== r &&
+      other.indexes.length > r.indexes.length &&
+      r.indexes.every(i => other.indexes.includes(i))
+    )
+  );
 }
 
 import * as turf from '@turf/turf';
